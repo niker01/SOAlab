@@ -1,0 +1,137 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - todo-net
+
+  user-service:
+    build: ./user-service
+    ports:
+      - "8001:8000"
+    environment:
+      - TZ=Europe/Kiev
+      - DATA_DIR=/data
+    volumes:
+      - user_data:/data
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - todo-net
+
+  task-service:
+    build: ./task-service
+    ports:
+      - "8002:8000"
+    environment:
+      - TZ=Europe/Kiev
+      - DATA_DIR=/data
+      - SAGA_TIMEOUT_SECONDS=10
+    volumes:
+      - task_data:/data
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - todo-net
+
+  notification-service:
+    build: ./notification-service
+    ports:
+      - "8003:8000"
+    environment:
+      - TZ=Europe/Kyiv
+      - DATA_DIR=/data
+    volumes:
+      - notification_data:/data
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - todo-net
+
+  mcp-server:
+    build: ./ai-integration
+    command: ["uvicorn", "mcp_server:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8004:8000"
+    depends_on:
+      - user-service
+      - task-service
+      - notification-service
+    networks:
+      - todo-net
+
+  consumer-agent:
+    build: ./ai-integration
+    command: ["uvicorn", "a2a_agent:consumer_app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8011:8000"
+    environment:
+      - AGENT_ROLE=consumer
+      - A2A_PUBLIC_URL=http://localhost:8011
+    depends_on:
+      - user-service
+      - notification-service
+    networks:
+      - todo-net
+
+  producer-agent:
+    build: ./ai-integration
+    command: ["uvicorn", "a2a_agent:producer_app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8010:8000"
+    environment:
+      - AGENT_ROLE=producer
+      - A2A_PUBLIC_URL=http://localhost:8010
+      - CONSUMER_AGENT_URL=http://consumer-agent:8000
+      - CONSUMER_AGENT_INTERNAL_RPC_URL=http://consumer-agent:8000/a2a/jsonrpc
+      - DATA_DIR=/data
+      - AI_DAILY_TOKEN_LIMIT=20000
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+    volumes:
+      - ai_usage_data:/data
+    depends_on:
+      - user-service
+      - task-service
+      - notification-service
+      - consumer-agent
+    networks:
+      - todo-net
+
+  nginx:
+    image: nginx:latest
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - user-service
+      - task-service
+      - notification-service
+      - producer-agent
+    networks:
+      - todo-net
+
+networks:
+  todo-net:
+    driver: bridge
+
+volumes:
+  rabbitmq_data:
+  user_data:
+  task_data:
+  notification_data:
+  ai_usage_data:
