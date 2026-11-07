@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import os
+import re
 from typing import Optional
 from uuid import UUID
 
@@ -28,6 +29,7 @@ MAX_COMPLETION_TOKENS = 400
 MAX_TOOL_ROUNDS = 5
 DAILY_TOKEN_LIMIT = int(os.getenv("AI_DAILY_TOKEN_LIMIT", "20000"))
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+FUNCTION_CALLING_MODE = os.getenv("AI_FUNCTION_CALLING_MODE", "openai").casefold()
 
 
 class ChatRequest(BaseModel):
@@ -243,6 +245,100 @@ def _bounded_records(records) -> list:
     return bounded
 
 
+def _mock_chat(
+    prompt: str,
+    token: str,
+    current_user: dict,
+    confirm_writes: bool,
+) -> dict:
+    email_match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", prompt)
+    if not email_match:
+        return {
+            "reply": "Mock mode requires an email address in the prompt. No tools were called.",
+            "model": "mock",
+            "tokens_used": 0,
+            "mode": "mock",
+            "tools_called": [],
+        }
+
+    verified = {"account": False}
+    tools_called = ["verify_account_email"]
+    verification = _dispatch_tool(
+        "verify_account_email",
+        json.dumps({"email": email_match.group(0)}),
+        token,
+        current_user,
+        verified,
+        confirm_writes,
+    )
+    if not verification["ok"]:
+        return {
+            "reply": verification["error"],
+            "model": "mock",
+            "tokens_used": 0,
+            "mode": "mock",
+            "tools_called": tools_called,
+        }
+
+    tools_called.append("list_tasks")
+    task_result = _dispatch_tool(
+        "list_tasks",
+        "{}",
+        token,
+        current_user,
+        verified,
+        confirm_writes,
+    )
+    if not task_result["ok"]:
+        reply = f"Could not list tasks: {task_result['error']}"
+    else:
+        tasks = task_result["tasks"]
+        create_match = re.search(
+            r"^(?:create task|створи задачу)\s*:\s*(.{1,200})\s*$",
+            prompt,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        if create_match:
+            title = create_match.group(1).strip()
+            tools_called.append("create_task")
+            creation = _dispatch_tool(
+                "create_task",
+                json.dumps(
+                    {"title": title, "description": None, "due_date": None}
+                ),
+                token,
+                current_user,
+                verified,
+                confirm_writes,
+            )
+            if creation["ok"]:
+                reply = f"Created task: {title}"
+            else:
+                reply = f"Task was not created: {creation['error']}"
+        else:
+            titles = [
+                task["title"]
+                for task in tasks
+                if isinstance(task.get("title"), str) and task["title"]
+            ]
+            if titles:
+                task_list = "\n".join(f"- {title}" for title in titles)
+                reply = (
+                    f"Tasks for {current_user['email']} "
+                    f"({len(tasks)} total):\n{task_list}"
+                )
+            else:
+                reply = f"No tasks found for {current_user['email']}."
+
+    return {
+        "reply": reply,
+        "model": "mock",
+        "tokens_used": 0,
+        "mode": "mock",
+        "tools_called": tools_called,
+    }
+
+
 @app.post("/chat")
 def chat(
     request: ChatRequest,
@@ -253,6 +349,19 @@ def chat(
     current_user = get_current_user(token)
     if current_user["id"] != user_id:
         raise HTTPException(status_code=401, detail="Token identity does not match account")
+
+    if FUNCTION_CALLING_MODE == "mock":
+        return _mock_chat(
+            request.prompt,
+            token,
+            current_user,
+            request.confirm_writes,
+        )
+    if FUNCTION_CALLING_MODE != "openai":
+        raise HTTPException(
+            status_code=500,
+            detail="AI_FUNCTION_CALLING_MODE must be 'openai' or 'mock'",
+        )
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:

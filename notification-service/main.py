@@ -5,6 +5,8 @@ import time
 import uuid
 from datetime import datetime
 from typing import List, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, Header, HTTPException
 
@@ -15,6 +17,7 @@ from schemas import NotificationSend, ReminderCreate, ReminderUpdate
 
 app = FastAPI(title="Reminder & Notification Service")
 logger = logging.getLogger(__name__)
+TASK_SERVICE_URL = "http://task-service:8000"
 
 
 def _reminder_dict(row):
@@ -39,6 +42,43 @@ def verify_token(authorization: Optional[str] = Header(None)):
     if not token.startswith(token_prefix) or not token[len(token_prefix):]:
         raise HTTPException(status_code=401, detail="Invalid token")
     return token[len(token_prefix):]
+
+
+def _verify_task_ownership(task_id: str, authorization: Optional[str]) -> None:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    request = Request(
+        f"{TASK_SERVICE_URL}/tasks/{task_id}",
+        headers={"Authorization": authorization},
+    )
+    try:
+        with urlopen(request, timeout=5) as response:
+            task = json.loads(response.read())
+    except HTTPError as exc:
+        if exc.code == 401:
+            raise HTTPException(status_code=401, detail="Invalid token") from exc
+        if exc.code == 404:
+            raise HTTPException(status_code=404, detail="Task not found") from exc
+        logger.exception("Task Service rejected reminder ownership verification")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not verify task ownership",
+        ) from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        logger.exception("Task Service unavailable during reminder ownership verification")
+        raise HTTPException(
+            status_code=503,
+            detail="Task Service is unavailable",
+        ) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.exception("Task Service returned an invalid task response")
+        raise HTTPException(
+            status_code=502,
+            detail="Task Service returned an invalid response",
+        ) from exc
+
+    if not isinstance(task, dict) or task.get("id") != task_id:
+        raise HTTPException(status_code=404, detail="Task not found")
 
 
 def _get_user_reminder(connection, reminder_id: str, user_id: str):
@@ -431,6 +471,7 @@ def create_reminder(
     authorization: Optional[str] = Header(None)
 ):
     user_id = verify_token(authorization)
+    _verify_task_ownership(reminder.task_id, authorization)
     reminder_id = str(uuid.uuid4())
     new_reminder = {
         "id": reminder_id,

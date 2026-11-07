@@ -4,7 +4,7 @@
 
 ## 1. Налаштування
 
-Потрібні Docker Desktop із запущеним Docker Engine та Postman. Для Function Calling потрібен також API-ключ OpenAI. Для звичайного REST API, MCP і A2A OpenAI-ключ не потрібний.
+Потрібні Docker Desktop із запущеним Docker Engine та Postman. Function Calling можна перевірити у mock-режимі без OpenAI API-ключа або у звичайному режимі з ключем. REST API, MCP і A2A OpenAI-ключа не потребують.
 
 Якщо хочеш використовувати Function Calling, створи локальний `.env` із шаблону:
 
@@ -20,9 +20,11 @@ notepad .env
 ```dotenv
 OPENAI_API_KEY=твій-ключ
 OPENAI_MODEL=gpt-4o-mini
+AI_FUNCTION_CALLING_MODE=openai
 ```
 
 Якщо `.env` вже існує, не копіюй шаблон повторно — просто відредагуй файл.
+Для роботи без API-кредитів установи `AI_FUNCTION_CALLING_MODE=mock`. Mock-режим не викликає OpenAI, не витрачає токени й підтримує лише описані нижче демонстраційні дії.
 
 ## 2. Запуск і зупинка
 
@@ -189,7 +191,23 @@ docker compose down
 
 ## 6. Function Calling через Postman
 
-Потрібен OpenAI API-ключ у `.env` і запущений `producer-agent`. Створи запит `AI chat`:
+### Перевірка без OpenAI API-ключа
+
+У `.env` установи:
+
+```dotenv
+AI_FUNCTION_CALLING_MODE=mock
+```
+
+Для цього режиму `OPENAI_API_KEY` не потрібен. Пересоздай лише Producer Agent, щоб він прочитав нову конфігурацію:
+
+```powershell
+docker compose up -d --force-recreate producer-agent
+```
+
+Образ перебудовувати не потрібно, якщо код не змінювався.
+
+Створи запит `AI chat`:
 
 - Method: `POST`
 - URL: `{{base_url}}/ai/chat`
@@ -198,12 +216,25 @@ docker compose down
 
 ```json
 {
-  "prompt": "Мій акаунт має email ai-test@example.com. Покажи мої задачі.",
+  "prompt": "Email: ai-test@example.com\nList my tasks.",
   "confirm_writes": false
 }
 ```
 
-Для перевірки створення/оновлення задачі попроси про конкретну зміну й встанови `"confirm_writes": true`. Це дозволяє моделі змінювати тестові дані. Запит без цього прапорця може читати дані, але запис буде відхилено.
+Mock-режим шукає email у prompt, перевіряє його через tool `verify_account_email`, а потім викликає `list_tasks`. Відповідь містить `"mode": "mock"`, `"model": "mock"`, `"tokens_used": 0` і список `"tools_called"`; у `reply` виводяться назви знайдених задач або повідомлення, що задач немає. Це перевіряє зв'язок endpoint → tools → REST API, але не перевіряє справжню LLM.
+
+Щоб перевірити створення тестової задачі, надішли:
+
+```json
+{
+  "prompt": "Email: ai-test@example.com\nCreate task: Mock function calling test",
+  "confirm_writes": true
+}
+```
+
+Задача створиться через Task Service. Перевір її через `GET {{base_url}}/tasks`. Без `"confirm_writes": true` створення буде відхилено.
+
+Для повернення до справжнього OpenAI-виклику зміни `AI_FUNCTION_CALLING_MODE=openai` у `.env` і пересоздай Producer Agent тією ж командою. Для цього режиму потрібен чинний OpenAI API-ключ і доступний API-білінг.
 
 ## 7. MCP через MCP Inspector
 
@@ -213,14 +244,19 @@ MCP — це окремий протокол, тому цей тест вико�
 2. У MCP Inspector вибери транспорт **Streamable HTTP**.
 3. Вкажи URL `http://localhost:8004/mcp`.
 4. Додай HTTP header `Authorization` зі значенням `Bearer <access_token>`.
-5. Під'єднайся та перевір tools `get_current_account`, `list_tasks`, `list_task_lists`, а також resources `todo://me/account` і `todo://me/tasks`.
+5. Під'єднайся та перевір tools `get_current_account`, `list_tasks`, `list_task_lists`, а також URI templates `todo://me/account/{user_id}` і `todo://me/tasks/{user_id}`. Для `{user_id}` використовуй `id` із `get_current_account`; сервер усе одно звіряє його з автентифікованим акаунтом.
 6. Для створення задачі виклич tool `create_task` з аргументами `title` і `confirmation: "CONFIRM"`. Для оновлення також додай `confirmation: "CONFIRM"`. Видалення вимагає `confirmation: "DELETE"`.
+7. `create_reminder` перевіряє через Task Service, що задача існує й належить поточному користувачу. MCP не надає окремого tool для негайного надсилання notification: notification створюється reminder worker-ом, коли настає час нагадування.
 
 Підтвердження у вигляді аргументу має передаватися MCP-клієнтом після погодження користувача; сам рядок не є криптографічним підтвердженням.
 
 ## 8. A2A Producer → Consumer через Postman
 
-A2A-запит до Producer створить задачу, а Producer передасть подію Consumer-у, який створить сповіщення. Створи запит `A2A create task and notify`:
+Повний флоу: Postman надсилає A2A-запит Producer-у → Producer створює задачу через Task Service → Task Service планує reminder на `due_date` → Producer передає `task_id` Consumer-у → Consumer перевіряє задачу й підтверджує обробку → коли настає `due_date`, Notification Service створює notification. До настання терміну notification не створюється.
+
+Перед тестом переконайся, що запущені `producer-agent`, `consumer-agent`, `task-service`, `notification-service` і `rabbitmq` (`docker compose ps`), а в Postman після `Login user` встановлена змінна `{{access_token}}`. Додай у Postman environment змінну `due_date` з майбутнім часом ISO 8601, наприклад `2030-01-02T15:00:00+02:00`. Щоб перевірити появу notification під час тесту, встанови її приблизно на 1–2 хвилини вперед від поточного локального часу. Перед запуском переглянь `GET {{base_url}}/tasks`, `GET {{base_url}}/reminders` і `GET {{base_url}}/notifications`, щоб відрізняти нові записи.
+
+Створи запит `A2A create task and schedule reminder`:
 
 - Method: `POST`
 - URL: `{{base_url}}/a2a/jsonrpc`
@@ -228,22 +264,22 @@ A2A-запит до Producer створить задачу, а Producer пере
 - Headers:
   - `Content-Type: application/json`
   - `A2A-Version: 1.0`
+- У вкладці Authorization обери тип **Bearer Token** і введи `{{access_token}}`.
 - Body:
 
 ```json
 {
   "jsonrpc": "2.0",
-  "id": "postman-a2a-1",
-  "method": "message/send",
+  "id": "{{$guid}}",
+  "method": "SendMessage",
   "params": {
     "message": {
-      "messageId": "postman-message-1",
-      "contextId": "postman-context-1",
-      "role": "user",
+      "messageId": "{{$guid}}",
+      "contextId": "{{$guid}}",
+      "role": "ROLE_USER",
       "parts": [
         {
-          "kind": "text",
-          "text": "{\"title\":\"A2A тестова задача\",\"description\":\"Тест Producer і Consumer\",\"due_date\":null}"
+          "text": "{\"title\":\"A2A reminder flow test\",\"description\":\"Перевірка Producer, Consumer і reminder\",\"due_date\":\"{{due_date}}\"}"
         }
       ]
     }
@@ -251,20 +287,28 @@ A2A-запит до Producer створить задачу, а Producer пере
 }
 ```
 
-Успішна відповідь означає, що Producer завершив обробку та отримав підтвердження від Consumer. Перевір результат запитами з Bearer-токеном:
+Переконайся, що заголовок `A2A-Version` увімкнений і має саме значення `1.0`. Метод `SendMessage` і роль `ROLE_USER` потрібні для A2A 1.0.
 
-- `GET {{base_url}}/tasks` — має з'явитися `A2A тестова задача`.
-- `GET {{base_url}}/notifications` — має з'явитися сповіщення про неї.
+Успішна відповідь має містити `result.task.status.state: "TASK_STATE_COMPLETED"`. У `result.task.artifacts` відкрий текст результату: там буде створена задача та повідомлення, що reminder запланований, а notification буде створено, коли настане час. Це підтвердження обробки події Consumer-ом, а не відправка notification. Перевір результат запитами з тим самим Bearer-токеном:
 
-Agent Cards можна відкрити в браузері або Postman:
+- `GET {{base_url}}/tasks` — має з'явитися `A2A reminder flow test` із заданим `due_date`.
+- `GET {{base_url}}/reminders` — має з'явитися активний reminder зі статусом `PENDING` і часом `due_date`.
+- До настання `due_date` у `GET {{base_url}}/notifications` не має з'явитися новий запис для створеної задачі.
 
-- Producer: `GET http://localhost:8010/.well-known/agent-card.json`
-- Consumer: `GET http://localhost:8011/.well-known/agent-card.json`
+Дочекайся `due_date` плюс до 10 секунд: Notification Service перевіряє reminders кожні 10 секунд. Після цього `GET {{base_url}}/reminders` має показати статус `TRIGGERED`, а `GET {{base_url}}/notifications` — notification із `task_id`, що збігається з ID створеної задачі. Проєкт створює notification-запис у Notification Service; це не означає реальне надсилання push-повідомлення на пристрій.
 
-Для діагностики A2A:
+Якщо передати `"due_date": null`, reminder і notification не створюються. A2A-відповідь `TASK_STATE_COMPLETED` підтверджує обробку події Consumer-ом, а не негайну відправку notification.
+
+Якщо A2A-відповідь має стан `TASK_STATE_FAILED` або немає reminder, перевір логи:
 
 ```powershell
 docker compose logs --tail=100 producer-agent consumer-agent
+docker compose logs --tail=100 task-service notification-service
 ```
+
+Agent Cards можна відкрити в Postman або браузері:
+
+- Producer: `GET http://localhost:8010/.well-known/agent-card.json`
+- Consumer: `GET http://localhost:8011/.well-known/agent-card.json`
 
 > A2A передає той самий Bearer-токен у внутрішньому виклику Consumer-у. Токен усе ще навчальний і не має підпису. Не виставляй стенд у публічну мережу.

@@ -39,7 +39,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from api_client import (
     APIRequestError,
-    NOTIFICATION_SERVICE_URL,
     TASK_SERVICE_URL,
     api_request,
     get_current_user,
@@ -108,16 +107,31 @@ async def _notify_consumer(task: dict, token: str) -> None:
                 service_parameters={"Authorization": f"Bearer {token}"}
             ),
         ):
-            if event.HasField("status_update"):
+            if event.HasField("task"):
+                status = event.task.status
+                state = status.state
+            elif event.HasField("status_update"):
+                status = event.status_update.status
                 state = event.status_update.status.state
-                if state == TaskState.TASK_STATE_COMPLETED:
-                    completed = True
-                elif state in {
-                    TaskState.TASK_STATE_FAILED,
-                    TaskState.TASK_STATE_CANCELED,
-                    TaskState.TASK_STATE_REJECTED,
-                }:
-                    raise RuntimeError("Consumer Agent failed to process the task event")
+            else:
+                continue
+
+            if state == TaskState.TASK_STATE_COMPLETED:
+                completed = True
+            elif state in {
+                TaskState.TASK_STATE_FAILED,
+                TaskState.TASK_STATE_CANCELED,
+                TaskState.TASK_STATE_REJECTED,
+            }:
+                details = ""
+                if status.HasField("message"):
+                    details = " ".join(
+                        part.text for part in status.message.parts if part.text
+                    )
+                message = "Consumer Agent failed to process the task event"
+                if details:
+                    message = f"{message}: {details}"
+                raise RuntimeError(message)
     finally:
         await client.close()
     if not completed:
@@ -215,13 +229,16 @@ class TodoAgentExecutor(AgentExecutor):
         return {
             "task": task,
             "consumer_agent": "Notification Consumer Agent",
-            "notification": "A2A consumer confirmed processing",
+            "reminder": (
+                "scheduled; notification will be created when it is due"
+                if task.get("due_date")
+                else "not scheduled because the task has no due date"
+            ),
         }
 
     async def _consume_task_event(self, data: dict, token: str) -> dict:
         request = ConsumeTaskEvent.model_validate(data)
         task_id = str(request.task_id)
-        user = get_current_user(token)
         task = api_request(
             TASK_SERVICE_URL,
             "GET",
@@ -230,18 +247,23 @@ class TodoAgentExecutor(AgentExecutor):
         )
         if task.get("id") != task_id:
             raise ValueError("Task Service returned a different task")
-        result = api_request(
-            NOTIFICATION_SERVICE_URL,
-            "POST",
-            "/notifications/send",
-            token,
-            {
-                "user_id": user["id"],
-                "message": f"Task created: {task['title']} ({task_id})",
-                "channel": "push",
-            },
-        )
-        return {"processed": True, "notification": result}
+        due_date = task.get("due_date")
+        return {
+            "processed": True,
+            "task_id": task_id,
+            "reminder": (
+                {
+                    "status": "scheduled",
+                    "reminder_time": due_date,
+                    "notification": "will be created when the reminder is due",
+                }
+                if due_date
+                else {
+                    "status": "not_scheduled",
+                    "notification": "not created because the task has no due date",
+                }
+            ),
+        }
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         if not context.task_id or not context.context_id:
@@ -253,14 +275,17 @@ class TodoAgentExecutor(AgentExecutor):
 def _build_app(role: str) -> FastAPI:
     if role == "producer":
         skill = AgentSkill(
-            id="create_task_and_notify",
-            name="Create task and notify",
+            id="create_task_and_schedule_reminder",
+            name="Create task and schedule reminder",
             description=(
-                "Create a task through the Task REST API, then delegate its "
-                "task-created event to the Notification Consumer Agent over A2A. "
-                "The caller must authenticate with a Bearer token in the A2A "
-                "HTTP Authorization header. Input is a JSON object containing "
-                "title, optional description, and optional ISO 8601 due_date."
+                "Create a task through the Task REST API. When due_date is set, "
+                "the Task Service schedules a reminder and the Notification "
+                "Service creates a notification only when the reminder is due. "
+                "Delegate the task-created event to the Consumer Agent for "
+                "confirmation. The caller must authenticate with a Bearer token "
+                "in the A2A HTTP Authorization header. Input is a JSON object "
+                "containing title, optional description, and optional ISO 8601 "
+                "due_date."
             ),
             tags=["tasks", "producer", "notifications", "a2a"],
             examples=[
@@ -274,9 +299,10 @@ def _build_app(role: str) -> FastAPI:
             id="process_task_created_event",
             name="Process task-created event",
             description=(
-                "Accept a task-created event from the Producer Agent and create "
-                "a notification for the owner authenticated by the forwarded "
-                "Bearer token. Input is a JSON object containing task_id."
+                "Accept a task-created event from the Producer Agent and confirm "
+                "the task's due-date reminder status. The Task Service schedules "
+                "the reminder; Notification Service creates a notification only "
+                "when it is due. Input is a JSON object containing task_id."
             ),
             tags=["consumer", "notifications", "a2a"],
             examples=[
@@ -289,9 +315,10 @@ def _build_app(role: str) -> FastAPI:
     agent_card = AgentCard(
         name="Todo Producer Agent" if role == "producer" else "Todo Consumer Agent",
         description=(
-            "Creates tasks and delegates task-created events to another A2A agent."
+            "Creates tasks, schedules due-date reminders, and delegates task-created "
+            "events to another A2A agent for confirmation."
             if role == "producer"
-            else "Consumes task-created events from the Producer Agent and sends notifications."
+            else "Consumes task-created events and confirms due-date reminder status."
         ),
         version="1.0.0",
         capabilities=AgentCapabilities(streaming=False, push_notifications=False),

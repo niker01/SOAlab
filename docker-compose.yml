@@ -1,6 +1,6 @@
 services:
   rabbitmq:
-    image: rabbitmq:3-management
+    image: rabbitmq:4-management
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -99,6 +99,7 @@ services:
       - CONSUMER_AGENT_INTERNAL_RPC_URL=http://consumer-agent:8000/a2a/jsonrpc
       - DATA_DIR=/data
       - AI_DAILY_TOKEN_LIMIT=20000
+      - AI_FUNCTION_CALLING_MODE=${AI_FUNCTION_CALLING_MODE:-openai}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
     volumes:

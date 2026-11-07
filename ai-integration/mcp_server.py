@@ -4,6 +4,7 @@ from uuid import UUID
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
 
 from api_client import (
@@ -308,24 +309,6 @@ def get_notification(
 
 
 @mcp.tool()
-def send_notification(
-    message: Annotated[str, Field(min_length=1, max_length=2000)],
-    channel: Literal["push", "email", "sms"],
-    confirmation: Literal["CONFIRM"],
-    ctx: Context,
-) -> dict:
-    """Create an owned notification after approval with confirmation="CONFIRM"."""
-    token, user = _validated_user(ctx)
-    return api_request(
-        NOTIFICATION_SERVICE_URL,
-        "POST",
-        "/notifications/send",
-        token,
-        {"user_id": user["id"], "message": message, "channel": channel},
-    )
-
-
-@mcp.tool()
 def delete_notification(
     notification_id: UUID,
     confirmation: Literal["DELETE"],
@@ -341,17 +324,21 @@ def delete_notification(
     )
 
 
-@mcp.resource("todo://me/account")
-def account_resource(ctx: Context) -> str:
+@mcp.resource("todo://me/account/{user_id}")
+def account_resource(user_id: str, ctx: Context) -> str:
     """Read the authenticated user's account profile."""
     _, user = _validated_user(ctx)
+    if user_id != user["id"]:
+        raise ValueError("Resource user_id must match the authenticated account")
     return json.dumps(user, ensure_ascii=False)
 
 
-@mcp.resource("todo://me/tasks")
-def tasks_resource(ctx: Context) -> str:
+@mcp.resource("todo://me/tasks/{user_id}")
+def tasks_resource(user_id: str, ctx: Context) -> str:
     """Read the authenticated user's task list."""
-    token, _ = _validated_user(ctx)
+    token, user = _validated_user(ctx)
+    if user_id != user["id"]:
+        raise ValueError("Resource user_id must match the authenticated account")
     tasks = api_request(TASK_SERVICE_URL, "GET", "/tasks", token)
     return json.dumps(tasks, ensure_ascii=False)
 
@@ -367,4 +354,16 @@ def manage_my_tasks(request: str) -> str:
     )
 
 
-app = mcp.streamable_http_app()
+app = mcp.streamable_http_app(
+    transport_security=TransportSecuritySettings(
+        allowed_hosts=[
+            "host.docker.internal:8004",
+            "localhost:8004",
+            "127.0.0.1:8004",
+        ],
+        allowed_origins=[
+            "http://localhost:6274",
+            "http://127.0.0.1:6274",
+        ],
+    )
+)
