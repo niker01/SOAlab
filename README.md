@@ -2,6 +2,24 @@
 
 Цей документ містить лише необхідне для налаштування, запуску й перевірки проєкту через Postman та MCP Inspector. Усі команди Docker виконуй у PowerShell з кореневої папки проєкту.
 
+## Event Storming сесія
+!(C:\Users\niker\Downloads\eventstorming.png)
+
+## Діаграма контекстів і компонентів
+!(C:\Users\niker\Downloads\diagram.png)
+
+## Архітектура мікросервісної системи
+!(C:\Users\niker\Downloads\architecture.png)
+
+## Мікросервісна діаграма викликів(Users)
+!(C:\Users\niker\Downloads\users.png)
+
+## Мікросервісна діаграма викликів(Tasks & Task Lists)
+!(C:\Users\niker\Downloads\tasks.png)
+
+## Мікросервісна діаграма викликів(Reminders & Notifications)
+!(C:\Users\niker\Downloads\reminders.png)
+
 ## Структура проєкту
 
 ```text
