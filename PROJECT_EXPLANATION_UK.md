@@ -2,6 +2,50 @@
 
 Цей документ містить лише необхідне для налаштування, запуску й перевірки проєкту через Postman та MCP Inspector. Усі команди Docker виконуй у PowerShell з кореневої папки проєкту.
 
+## Структура проєкту
+
+```text
+SOAlab/
+├── ai-integration/
+│   ├── a2a_agent.py          # A2A Producer і Consumer
+│   ├── function_calling.py   # Function Calling endpoint, tools і mock-режим
+│   ├── mcp_server.py         # MCP tools, resources і prompt
+│   ├── api_client.py         # Спільний клієнт для REST-сервісів
+│   ├── ai_database.py        # Облік використання токенів
+│   ├── requirements.txt      # Залежності AI-сервісів
+│   └── Dockerfile
+├── user-service/
+│   ├── main.py               # Реєстрація, вхід і API користувачів
+│   ├── schemas.py             # Схеми запитів і відповідей
+│   ├── database.py            # Робота з базою даних користувачів
+│   ├── rabbitmq.py             # Обмін подіями через RabbitMQ
+│   ├── requirements.txt
+│   └── Dockerfile
+├── task-service/
+│   ├── main.py               # API задач і списків, планування reminder
+│   ├── schemas.py             # Схеми задач і списків
+│   ├── database.py            # База даних і outbox
+│   ├── rabbitmq.py             # Обробка та передавання подій
+│   ├── requirements.txt
+│   └── Dockerfile
+├── notification-service/
+│   ├── main.py               # API reminders і notifications та reminder worker
+│   ├── schemas.py             # Схеми нагадувань і сповіщень
+│   ├── database.py            # База даних і outbox
+│   ├── rabbitmq.py             # Отримання подій від інших сервісів
+│   ├── requirements.txt
+│   └── Dockerfile
+├── nginx/
+│   └── nginx.conf             # Маршрутизація API-запитів до сервісів
+├── docker-compose.yml         # Сервіси, мережа, порти й volumes
+├── .env.example               # Шаблон змінних середовища
+├── .dockerignore
+├── .gitignore
+└── PROJECT_EXPLANATION_UK.md  # Інструкція запуску й тестування
+```
+
+`docker-compose.yml` запускає сервіси та RabbitMQ у спільній Docker-мережі. Клієнтські запити до REST API та Function Calling проходять через Nginx. MCP-сервер і A2A-агенти запускаються окремими контейнерами, а всередині мережі звертаються до User, Task і Notification Service. Локальний `.env` містить власні налаштування та секрети, тому в структурі наведено лише безпечний шаблон `.env.example`.
+
 ## 1. Налаштування
 
 Потрібні Docker Desktop із запущеним Docker Engine та Postman. Function Calling можна перевірити у mock-режимі без OpenAI API-ключа або у звичайному режимі з ключем. REST API, MCP і A2A OpenAI-ключа не потребують.
@@ -240,11 +284,17 @@ Mock-режим шукає email у prompt, перевіряє його чере
 
 MCP — це окремий протокол, тому цей тест виконуй у MCP Inspector, а не звичайним REST-запитом у Postman:
 
-1. Запусти проєкт командою `docker compose up --build -d`.
-2. У MCP Inspector вибери транспорт **Streamable HTTP**.
-3. Вкажи URL `http://localhost:8004/mcp`.
+1. Запусти потрібні сервіси командою `docker compose up -d --build mcp-server notification-service`.
+2. Запусти Inspector в окремому вікні PowerShell:
+
+   ```powershell
+   docker run --rm -p 127.0.0.1:6274:6274 ghcr.io/modelcontextprotocol/inspector
+   ```
+
+   Перший запуск завантажить Docker-образ Inspector. Залиш це вікно відкритим і відкрий адресу, яку команда надрукує, або `http://localhost:6274`.
+3. У MCP Inspector натисни **Add Servers → Add manually**, вибери транспорт **Streamable HTTP** і вкажи URL `http://host.docker.internal:8004/mcp`. Оскільки Inspector запущений у Docker, тут потрібен `host.docker.internal`, а не `localhost`.
 4. Додай HTTP header `Authorization` зі значенням `Bearer <access_token>`.
-5. Під'єднайся та перевір tools `get_current_account`, `list_tasks`, `list_task_lists`, а також URI templates `todo://me/account/{user_id}` і `todo://me/tasks/{user_id}`. Для `{user_id}` використовуй `id` із `get_current_account`; сервер усе одно звіряє його з автентифікованим акаунтом.
+5. Під'єднайся та перевір tools `get_current_account`, `list_tasks`, `list_task_lists`, `list_reminders` і `list_notifications`, а також URI templates `todo://me/account/{user_id}` і `todo://me/tasks/{user_id}`. Для `{user_id}` використовуй `id` із `get_current_account`; сервер звіряє його з автентифікованим акаунтом.
 6. Для створення задачі виклич tool `create_task` з аргументами `title` і `confirmation: "CONFIRM"`. Для оновлення також додай `confirmation: "CONFIRM"`. Видалення вимагає `confirmation: "DELETE"`.
 7. `create_reminder` перевіряє через Task Service, що задача існує й належить поточному користувачу. MCP не надає окремого tool для негайного надсилання notification: notification створюється reminder worker-ом, коли настає час нагадування.
 
